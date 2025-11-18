@@ -3,17 +3,29 @@ using RabbitMQ.Client;
 
 namespace OnionTemplate.Infrastructure.Services;
 
-public class RabbitMQPublisherService : IRabbitMQPublisherService
+public class RabbitMQPublisherService : IRabbitMQPublisherService, IAsyncDisposable
 {
-    IConnection _connection;
-    IChannel _channel;
+    private IConnection? _connection;
+    private IChannel? _channel;
+
+    // Use a Lazy<T> to ensure the initialization is thread-safe and happens only once.
+    private readonly Lazy<Task> _initializationTask;
 
     public RabbitMQPublisherService()
     {
-        var factory = new ConnectionFactory() { HostName = "localhost" };
-        _connection = factory.CreateConnectionAsync().Result;
+        _initializationTask = new Lazy<Task>(InitializeRabbitMQAsync);
+    }
 
-        _channel = _connection.CreateChannelAsync().Result;
+    private async Task InitializeRabbitMQAsync()
+    {
+        var factory = new ConnectionFactory() { HostName = "localhost" };
+        _connection = await factory.CreateConnectionAsync();
+        _channel = await _connection.CreateChannelAsync();
+    }
+
+    private async Task EnsureInitializedAsync()
+    {
+        await _initializationTask.Value;
     }
 
     public async Task PublishMessage(string exchangeName, string routingKey, string message)
@@ -44,5 +56,17 @@ public class RabbitMQPublisherService : IRabbitMQPublisherService
         await _channel.QueueBindAsync(queue: queueName,
                            exchange: exchangeName,
                            routingKey: routingKey);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_channel?.IsOpen ?? false)
+        {
+            await _channel.CloseAsync();
+        }
+        if (_connection?.IsOpen ?? false)
+        {
+            await _connection.CloseAsync();
+        }
     }
 }
