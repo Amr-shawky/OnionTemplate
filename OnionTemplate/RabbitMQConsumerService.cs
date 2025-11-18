@@ -9,27 +9,30 @@ namespace OnionTemplate
 {
     public class RabbitMQConsumerService : IHostedService
     {
-        IConnection _connection;
-        IChannel _channel;
-        IMediator _mediator;
+        private IConnection? _connection;
+        private IChannel? _channel;
+        private readonly IMediator _mediator;
+
         public RabbitMQConsumerService(IMediator mediator)
         {
             _mediator = mediator;
+        }
 
+        private async Task InitializeRabbitMQAsync(CancellationToken cancellationToken)
+        {
             var factory = new ConnectionFactory() { HostName = "localhost" };
-            _connection = factory.CreateConnectionAsync().Result;
-            _channel = _connection.CreateChannelAsync().Result;
-
-           // _channel.BasicGetAsync() // pull mechanism
+            _connection = await factory.CreateConnectionAsync(cancellationToken);
+            _channel = await _connection.CreateChannelAsync(cancellationToken);
         }
 
         public async Task StartAsync(CancellationToken cancellationToken)
         {
+            await InitializeRabbitMQAsync(cancellationToken);
+
             var consumer = new AsyncEventingBasicConsumer(_channel);
+            consumer.Received += Consumer_ReceivedAync;
 
-            consumer.ReceivedAsync += Consumer_ReceivedAync; // push mechanism
-
-           await  _channel.BasicConsumeAsync("Bosta", false, consumer);
+            await _channel.BasicConsumeAsync("Bosta", autoAck: false, consumer: consumer);
         }
 
         private async Task Consumer_ReceivedAync(object sender, BasicDeliverEventArgs @event)
@@ -37,21 +40,21 @@ namespace OnionTemplate
             try
             {
                 var message = Encoding.UTF8.GetString(@event.Body.ToArray());
-
                 var basicMessage = GetMessage(message);
-
                 InvokeConsumer(basicMessage);
+
+                // Acknowledge the message after successful processing
+                await _channel.BasicAckAsync(@event.DeliveryTag, multiple: false);
             }
             catch (Exception ex)
             {
-                // Log the exception (you can use a logging framework here)
+                // Log the exception (e.g., using Serilog or ILogger)
                 Console.WriteLine($"Error processing message: {ex.Message}");
-            }
-            finally
-            {
-                // Acknowledge the message regardless of success or failure to prevent re-delivery
-                await _channel.BasicAckAsync(@event.DeliveryTag, false);
 
+                // Negatively acknowledge the message and requeue it for another attempt.
+                // In a real-world scenario, you might want to implement a retry mechanism
+                // with a dead-letter queue after a certain number of retries.
+                await _channel.BasicNackAsync(@event.DeliveryTag, multiple: false, requeue: true);
             }
         }
 
@@ -60,28 +63,51 @@ namespace OnionTemplate
             var namespaceName = "OnionTemplate.MessageBroker.Consumers";
             var typeName = basicMessage.Type.Replace("Message", "Consumer");
 
-            Type type = Type.GetType($"{namespaceName}.{typeName},OnionTemplate");
+            // Ensure the assembly name is correct for type resolution.
+            Type type = Type.GetType($"{namespaceName}.{typeName}, OnionTemplate");
 
+            if (type == null)
+            {
+                throw new InvalidOperationException($"Consumer type not found for message type: {basicMessage.Type}");
+            }
 
             var consumer = Activator.CreateInstance(type, _mediator);
-            var methodInfo =  type.GetMethod("Consume");
+            var methodInfo = type.GetMethod("Consume");
 
-            methodInfo.Invoke(consumer, new object[] { basicMessage });
-
+            methodInfo?.Invoke(consumer, new object[] { basicMessage });
         }
 
         private BasicMessage GetMessage(string message)
         {
             var basicMessage = System.Text.Json.JsonSerializer.Deserialize<BasicMessage>(message);
-            var namesapce = "OnionTemplate.MessageBroker.Messages";
-            Type type = Type.GetType($"{namesapce}.{basicMessage.Type},OnionTemplate");
+            if (basicMessage?.Type == null)
+            {
+                throw new InvalidOperationException("Message type is missing.");
+            }
 
-            return System.Text.Json.JsonSerializer.Deserialize(message, type) as BasicMessage;
+            var @namespace = "OnionTemplate.MessageBroker.Messages";
+            // Ensure the assembly name is correct for type resolution.
+            Type type = Type.GetType($"{@namespace}.{basicMessage.Type}, OnionTemplate");
+
+            if (type == null)
+            {
+                throw new InvalidOperationException($"Message contract type not found: {basicMessage.Type}");
+            }
+
+            return System.Text.Json.JsonSerializer.Deserialize(message, type) as BasicMessage ?? throw new InvalidOperationException("Failed to deserialize message.");
         }
 
         public Task StopAsync(CancellationToken cancellationToken)
         {
-            throw new NotImplementedException();
+            if (_channel?.IsOpen ?? false)
+            {
+                _channel.Close();
+            }
+            if (_connection?.IsOpen ?? false)
+            {
+                _connection.Close();
+            }
+            return Task.CompletedTask;
         }
     }
 }

@@ -13,8 +13,15 @@ namespace OnionTemplate.MessageBroker.Consumers
 
         public void Consume(BasicMessage basicMessage)
         {
-            var message = basicMessage as ProductCreatedMessage;
+            if (basicMessage is ProductCreatedMessage message)
+            {
+                // In a real application, you would use MediatR to send a command
+                // or event to be handled by your application logic.
+                // For example:
+                // _mediator.Send(new CreateProductCommand(message.Name, message.Brand, message.Price));
 
+                Console.WriteLine($"Consumed ProductCreatedMessage for product: {message.Name}");
+            }
         }
     }
 }
